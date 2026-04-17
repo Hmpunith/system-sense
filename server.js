@@ -118,11 +118,11 @@ app.post('/api/analyze', async (req, res) => {
     const cachedResult = analysisCache.get(logHash);
     
     if (cachedResult) {
-      console.log(`[Cache Hit] Serving analysis for: ${logHash}`);
+      logger.info({ logHash }, 'Cache Hit');
       return res.json(cachedResult);
     }
 
-    console.log(`[Cache Miss] Calling Gemini for log: ${logHash.substring(0, 8)}...`);
+    logger.info({ logHash: logHash.substring(0, 8) }, 'Cache Miss');
 
     // 3. AI Analysis
     const model = genAI.getGenerativeModel({
