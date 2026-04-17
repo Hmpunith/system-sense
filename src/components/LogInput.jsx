@@ -57,7 +57,12 @@ export default function LogInput({ logText, onLogTextChange }) {
           Log Input
         </h2>
         <div className="log-input__meta">
-          <span className="log-input__char-count">
+          <span 
+            className="log-input__char-count"
+            role="status"
+            aria-live="polite"
+            aria-label={`${logText.length} characters entered`}
+          >
             {logText.length.toLocaleString()} chars
           </span>
           {logText.length > 0 && (
@@ -66,6 +71,7 @@ export default function LogInput({ logText, onLogTextChange }) {
               onClick={handleClear}
               type="button"
               id="clear-log-btn"
+              aria-label="Clear log text"
             >
               Clear
             </button>
@@ -85,9 +91,11 @@ export default function LogInput({ logText, onLogTextChange }) {
         onDrop={handleDrop}
         spellCheck="false"
         autoComplete="off"
+        aria-label="Windows system log content"
+        aria-describedby="log-input-hints"
       />
 
-      <div className="log-input__hints">
+      <div className="log-input__hints" id="log-input-hints">
         <span className="log-input__hint">DISM</span>
         <span className="log-input__hint">SFC /scannow</span>
         <span className="log-input__hint">BSOD Dump</span>

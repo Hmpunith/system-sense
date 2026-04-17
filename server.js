@@ -4,6 +4,10 @@ import dotenv from 'dotenv';
 import path from 'path';
 import { fileURLToPath } from 'url';
 import { GoogleGenerativeAI } from '@google/generative-ai';
+import helmet from 'helmet';
+import { rateLimit } from 'express-rate-limit';
+import NodeCache from 'node-cache';
+import crypto from 'crypto';
 
 dotenv.config();
 
@@ -13,8 +17,24 @@ const __dirname = path.dirname(__filename);
 const app = express();
 const PORT = process.env.PORT || 8080;
 
+// Initialize Cache (5-minute TTL, check every 60 seconds)
+const analysisCache = new NodeCache({ stdTTL: 300, checkperiod: 60 });
+
+// ── Middleware ──
+app.use(helmet()); // Professional security headers
 app.use(cors());
-app.use(express.json({ limit: '10mb' }));
+app.use(express.json({ limit: '5mb' }));
+
+// Rate Limiting (10 requests per minute per IP)
+const limiter = rateLimit({
+  windowMs: 1 * 60 * 1000,
+  max: 10,
+  message: { error: 'Too many diagnostic requests. Please try again in a minute.' },
+  standardHeaders: true,
+  legacyHeaders: false,
+});
+
+app.use('/api/', limiter);
 
 // ── Gemini Configuration ──
 const genAI = new GoogleGenerativeAI(process.env.GEMINI_API_KEY);
@@ -46,23 +66,41 @@ Rules:
 - For DISM logs: look for CBS (Component-Based Servicing) errors and source file issues.
 - severity should be "critical" for BSOD and system-breaking errors, "warning" for repairable corruption, "info" for minor or already-resolved issues.`;
 
-// ── API Routes ──
+/**
+ * API Route: Analyze Windows Logs
+ * Uses Gemini AI with a specific diagnostic persona and structured output.
+ * Implements hashing-based caching to reduce API costs and improve performance.
+ */
 app.post('/api/analyze', async (req, res) => {
   try {
     const { logText } = req.body;
-    if (!logText) {
-      return res.status(400).json({ error: 'logText is required' });
+    
+    // 1. Validation
+    if (!logText || typeof logText !== 'string' || logText.trim().length === 0) {
+      return res.status(400).json({ error: 'Valid log text is required for analysis.' });
     }
 
     if (!process.env.GEMINI_API_KEY) {
-      return res.status(500).json({ error: 'GEMINI_API_KEY is not configured on the server.' });
+      return res.status(500).json({ error: 'Gemini service is not configured (Missing API Key).' });
     }
 
+    // 2. Cache Check (MD5 hash of log text)
+    const logHash = crypto.createHash('md5').update(logText.trim()).digest('hex');
+    const cachedResult = analysisCache.get(logHash);
+    
+    if (cachedResult) {
+      console.log(`[Cache Hit] Serving analysis for: ${logHash}`);
+      return res.json(cachedResult);
+    }
+
+    console.log(`[Cache Miss] Calling Gemini for log: ${logHash.substring(0, 8)}...`);
+
+    // 3. AI Analysis
     const model = genAI.getGenerativeModel({
       model: 'gemini-2.5-flash',
       systemInstruction: SYSTEM_INSTRUCTION,
       generationConfig: {
-        temperature: 0.2,
+        temperature: 0.1, // Lower temperature for more deterministic diagnostic results
         topP: 0.8,
         maxOutputTokens: 2048,
         responseMimeType: 'application/json',
@@ -70,25 +108,34 @@ app.post('/api/analyze', async (req, res) => {
     });
 
     const result = await model.generateContent(
-      `Analyze the following Windows system log and provide your diagnosis:\n\n${logText}`
+      `Analyze the following Windows system log and provide your diagnosis:\n\n${logText.substring(0, 8000)}`
     );
 
-    const response = result.response;
+    const response = await result.response;
     const text = response.text();
 
     let parsedResult;
     try {
       parsedResult = JSON.parse(text);
     } catch {
-      // If the model returned text wrapped in markdown code fences, strip them
+      // Robust stripping of markdown code fences if model fails to respect JSON mode
       const cleaned = text.replace(/```json\n?/g, '').replace(/```\n?/g, '').trim();
       parsedResult = JSON.parse(cleaned);
     }
 
+    // 4. Update Cache and Return
+    analysisCache.set(logHash, parsedResult);
     res.json(parsedResult);
+    
   } catch (error) {
     console.error('Error analyzing log:', error);
-    res.status(500).json({ error: error.message || 'An error occurred during analysis.' });
+    
+    // Determine appropriate error response
+    if (error.message?.includes('quota')) {
+      return res.status(429).json({ error: 'Gemini API quota exceeded. Please try again later.' });
+    }
+    
+    res.status(500).json({ error: 'An unexpected error occurred during AI analysis.' });
   }
 });
 
@@ -103,6 +150,10 @@ app.use((req, res) => {
 });
 
 // ── Start Server ──
-app.listen(PORT, () => {
-  console.log(`Server listening on port ${PORT}`);
-});
+if (process.env.NODE_ENV !== 'test') {
+  app.listen(PORT, () => {
+    console.log(`Server listening on port ${PORT}`);
+  });
+}
+
+export default app;

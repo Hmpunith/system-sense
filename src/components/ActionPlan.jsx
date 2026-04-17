@@ -26,6 +26,7 @@ function CopyButton({ text, label }) {
       className={`action-plan__copy-btn ${copied ? 'action-plan__copy-btn--copied' : ''}`}
       onClick={handleCopy}
       title={copied ? 'Copied!' : `Copy ${label || 'command'}`}
+      aria-label={copied ? 'Command copied to clipboard' : `Copy ${label || 'command'}`}
       type="button"
     >
       {copied ? '✓' : '⧉'}
@@ -41,50 +42,57 @@ export default function ActionPlan({ result }) {
   const allCommands = (commands || []).map((c) => c.command).join('\n\n');
 
   return (
-    <div className="action-plan" id="action-plan-section">
+    <section className="action-plan" id="action-plan-section" aria-labelledby="action-plan-title">
+      <h2 id="action-plan-title" className="sr-only">Diagnostic Action Plan</h2>
+      
       {/* ── Error Summary ── */}
-      <div className="action-plan__error-card">
+      <article className="action-plan__error-card" aria-labelledby="error-summary-title">
         <div className="action-plan__error-header">
-          <span className="action-plan__section-label">
+          <span className="action-plan__section-label" id="error-summary-title">
             🔍 Error Identified
           </span>
           {severity && (
-            <span className={`action-plan__severity action-plan__severity--${severity}`}>
-              {severity === 'critical' && '🔴'}
-              {severity === 'warning' && '🟡'}
-              {severity === 'info' && '🔵'}
+            <span 
+              className={`action-plan__severity action-plan__severity--${severity}`}
+              role="status"
+              aria-live="polite"
+            >
+              {severity === 'critical' && '🔴 '}
+              {severity === 'warning' && '🟡 '}
+              {severity === 'info' && '🔵 '}
               {severity.toUpperCase()}
             </span>
           )}
         </div>
 
-        <div className="action-plan__error-code">
-          <span className="action-plan__error-code-dot" />
+        <h3 className="action-plan__error-code">
+          <span className="action-plan__error-code-dot" aria-hidden="true" />
           {errorCode || 'Unknown'}
           {errorName && (
             <span style={{ fontSize: '0.75rem', color: 'var(--text-secondary)', fontWeight: 400 }}>
-              — {errorName}
+               — {errorName}
             </span>
           )}
-        </div>
+        </h3>
 
         {diagnosis && (
-          <p className="action-plan__diagnosis">{diagnosis}</p>
+          <p className="action-plan__diagnosis" aria-label="Diagnosis">{diagnosis}</p>
         )}
-      </div>
+      </article>
 
       {/* ── PowerShell Commands ── */}
       {commands && commands.length > 0 && (
-        <div className="action-plan__commands-card">
+        <article className="action-plan__commands-card" aria-labelledby="commands-title">
           <div className="action-plan__commands-header">
-            <span className="action-plan__section-label">
+            <h3 className="action-plan__section-label" id="commands-title">
               ⚙️ Action Plan — PowerShell Commands
-            </span>
+            </h3>
             <button
               className="action-plan__copy-all-btn"
               onClick={() => navigator.clipboard.writeText(allCommands)}
               type="button"
               id="copy-all-commands-btn"
+              aria-label="Copy all PowerShell commands to clipboard"
             >
               ⧉ Copy All
             </button>
@@ -98,18 +106,18 @@ export default function ActionPlan({ result }) {
                 </span>
                 <CopyButton text={cmd.command} label={cmd.label} />
               </div>
-              <pre className="action-plan__command-code">{cmd.command}</pre>
+              <pre className="action-plan__command-code" tabIndex="0">{cmd.command}</pre>
             </div>
           ))}
-        </div>
+        </article>
       )}
 
       {/* ── Detailed Explanation ── */}
       {explanation && (
-        <div className="action-plan__explanation-card">
-          <div className="action-plan__section-label" style={{ marginBottom: '0.75rem' }}>
+        <article className="action-plan__explanation-card" aria-labelledby="explanation-title">
+          <h3 className="action-plan__section-label" id="explanation-title" style={{ marginBottom: '0.75rem' }}>
             📋 Detailed Explanation
-          </div>
+          </h3>
           <p
             className="action-plan__explanation-text"
             dangerouslySetInnerHTML={{
@@ -118,8 +126,8 @@ export default function ActionPlan({ result }) {
                 .replace(/\n/g, '<br />')
             }}
           />
-        </div>
+        </article>
       )}
-    </div>
+    </section>
   );
 }
