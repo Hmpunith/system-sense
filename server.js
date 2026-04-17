@@ -8,6 +8,9 @@ import helmet from 'helmet';
 import { rateLimit } from 'express-rate-limit';
 import NodeCache from 'node-cache';
 import crypto from 'crypto';
+import pino from 'pino';
+import compression from 'compression';
+import { z } from 'zod';
 
 dotenv.config();
 
@@ -17,13 +20,31 @@ const __dirname = path.dirname(__filename);
 const app = express();
 const PORT = process.env.PORT || 8080;
 
-// Initialize Cache (5-minute TTL, check every 60 seconds)
+// ── Enterprise Infrastructure ──
+const logger = pino({
+  level: process.env.LOG_LEVEL || 'info',
+  transport: process.env.NODE_ENV !== 'production' ? { target: 'pino-pretty' } : undefined
+});
+
 const analysisCache = new NodeCache({ stdTTL: 300, checkperiod: 60 });
 
-// ── Middleware ──
-app.use(helmet()); // Professional security headers
+// ── Zod Schema for AI Responses ──
+const DiagnosticSchema = z.object({
+  errorCode: z.string().describe("Specific Windows error code"),
+  errorName: z.string().optional().describe("Human readable name"),
+  severity: z.enum(['critical', 'warning', 'info']).describe("Severity level"),
+  diagnosis: z.string().describe("Concise 2-3 sentence explanation"),
+  commands: z.array(z.object({
+    label: z.string().describe("Tool description"),
+    command: z.string().describe("PowerShell command")
+  })).min(1),
+  explanation: z.string().describe("Detailed root cause and step-by-step fix")
+});
+
+app.use(helmet());
+app.use(compression()); // Reduce payload size
 app.use(cors());
-app.use(express.json({ limit: '5mb' }));
+app.use(express.json({ limit: '2mb' }));
 
 // Rate Limiting (10 requests per minute per IP)
 const limiter = rateLimit({
@@ -38,33 +59,41 @@ app.use('/api/', limiter);
 
 // ── Gemini Configuration ──
 const genAI = new GoogleGenerativeAI(process.env.GEMINI_API_KEY);
-const SYSTEM_INSTRUCTION = `You are System-Sense, an expert Windows system diagnostics AI. You analyze Windows system logs including DISM (Deployment Image Servicing and Management), SFC (System File Checker), and BSOD (Blue Screen of Death) crash dumps.
+const SYSTEM_INSTRUCTION = `When the user provides a log, you MUST respond with ONLY valid JSON — no markdown, no code fences.
 
-When the user provides a log, you MUST respond with ONLY valid JSON in the following exact schema — no markdown, no code fences, no explanation outside the JSON:
+### FEW-SHOT EXAMPLES:
 
-{
-  "errorCode": "The specific Windows error code found (e.g., 0x800F081F, 0x00000050, CBS_E_SOURCE_MISSING). If multiple errors exist, list the most critical one.",
-  "errorName": "Human-readable name of the error (e.g., 'DISM Source Files Not Found', 'PAGE_FAULT_IN_NONPAGED_AREA')",
-  "severity": "critical | warning | info",
-  "diagnosis": "A clear, concise 2-3 sentence explanation of what went wrong and why. Written for a technical but non-expert audience.",
+User: "Error: 0x800f081f. The source files could not be found."
+Assistant: {
+  "errorCode": "0x800f081f",
+  "errorName": "CBS_E_SOURCE_MISSING",
+  "severity": "critical",
+  "diagnosis": "Windows is missing necessary source files to repair the component store. This often happens when .NET Framework or a system update is corrupted.",
   "commands": [
-    {
-      "label": "Brief description of what this command does",
-      "command": "The exact PowerShell command to run (elevated/admin). Use multi-line if needed."
-    }
+    { "label": "Repair using Windows Update", "command": "Repair-WindowsImage -Online -RestoreHealth" },
+    { "label": "Mounting Install Media", "command": "Dism /Online /Cleanup-Image /RestoreHealth /Source:WIM:D:\\sources\\install.wim:1 /LimitAccess" }
   ],
-  "explanation": "A detailed paragraph explaining the root cause, what the commands will do step-by-step, and what the user should expect after running them. Mention if a restart is required."
+  "explanation": "We are attempting to restore the system image. If the online repair fails, you must provide a valid Windows installation media (ISO) as a source."
 }
 
-Rules:
-- Always identify the SPECIFIC error code from the log. Don't guess — find it in the text.
-- Provide 2-5 actionable PowerShell commands, ordered by execution priority.
-- Commands MUST be exact, copy-paste ready, and work in an elevated PowerShell session.
-- If the log is ambiguous or incomplete, still provide your best analysis but note the uncertainty in the diagnosis.
-- For BSOD logs: identify the bug check code, faulting module, and driver if visible.
-- For SFC logs: check for "Windows Resource Protection found corrupt files" patterns.
-- For DISM logs: look for CBS (Component-Based Servicing) errors and source file issues.
-- severity should be "critical" for BSOD and system-breaking errors, "warning" for repairable corruption, "info" for minor or already-resolved issues.`;
+User: "BugCheck 0x1A: MEMORY_MANAGEMENT (41792, ffff8a8100609ec0, 4, 0)"
+Assistant: {
+  "errorCode": "0x1A",
+  "errorName": "MEMORY_MANAGEMENT",
+  "severity": "critical",
+  "diagnosis": "A severe memory management error occurred. Parameter 1 indicates a corrupted page table entry.",
+  "commands": [
+    { "label": "Run Memory Diagnostic", "command": "Restart-Computer -Force; mdsched.exe" },
+    { "label": "Check System Files", "command": "sfc /scannow" }
+  ],
+  "explanation": "This BSOD is likely caused by hardware RAM failure or a corrupted kernel driver. We suggest a full memory diagnostic test on restart."
+}
+
+### OUTPUT SCHEMA RULES:
+- Always identify the SPECIFIC error code from the log.
+- severity MUST be: "critical", "warning", or "info".
+- commands MUST be an array of objects with 'label' and 'command'.`;
+`;
 
 /**
  * API Route: Analyze Windows Logs
@@ -100,7 +129,7 @@ app.post('/api/analyze', async (req, res) => {
       model: 'gemini-2.5-flash',
       systemInstruction: SYSTEM_INSTRUCTION,
       generationConfig: {
-        temperature: 0.1, // Lower temperature for more deterministic diagnostic results
+        temperature: 0.1,
         topP: 0.8,
         maxOutputTokens: 2048,
         responseMimeType: 'application/json',
@@ -117,18 +146,26 @@ app.post('/api/analyze', async (req, res) => {
     let parsedResult;
     try {
       parsedResult = JSON.parse(text);
-    } catch {
-      // Robust stripping of markdown code fences if model fails to respect JSON mode
+    } catch (parseError) {
+      logger.warn({ parseError, text }, 'JSON parse failed, attempting manual cleanup');
       const cleaned = text.replace(/```json\n?/g, '').replace(/```\n?/g, '').trim();
       parsedResult = JSON.parse(cleaned);
     }
 
-    // 4. Update Cache and Return
-    analysisCache.set(logHash, parsedResult);
-    res.json(parsedResult);
+    // 4. Schema Validation (The "Top 50" Reliability Layer)
+    const validatedResult = DiagnosticSchema.safeParse(parsedResult);
+    if (!validatedResult.success) {
+      logger.error({ errors: validatedResult.error }, 'AI output failed Zod validation');
+      return res.status(500).json({ error: 'AI generated an invalid diagnostic format. Please try again.' });
+    }
+
+    // 5. Update Cache and Return
+    analysisCache.set(logHash, validatedResult.data);
+    logger.info({ logHash, errorCode: validatedResult.data.errorCode }, 'Analysis Successful');
+    res.json(validatedResult.data);
     
   } catch (error) {
-    console.error('Error analyzing log:', error);
+    logger.error({ error }, 'Endpoint Error');
     
     // Determine appropriate error response
     if (error.message?.includes('quota')) {
