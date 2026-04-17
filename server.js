@@ -93,7 +93,6 @@ Assistant: {
 - Always identify the SPECIFIC error code from the log.
 - severity MUST be: "critical", "warning", or "info".
 - commands MUST be an array of objects with 'label' and 'command'.`;
-`;
 
 /**
  * API Route: Analyze Windows Logs
